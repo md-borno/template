@@ -11,7 +11,9 @@ RUN apk add --no-cache \
     git \
     nodejs \
     npm \
-    sqlite
+    sqlite \
+    supervisor \
+    nginx
 
 # Install PHP extensions
 RUN docker-php-ext-install \
@@ -28,47 +30,45 @@ COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www
 
-# Copy application files
+# Copy application files FIRST
 COPY . /var/www
 
-# Install PHP dependencies
+# Install PHP dependencies BEFORE npm build
 RUN composer install --no-interaction --optimize-autoloader --no-dev
 
-# Install Node dependencies and build assets
+# NOW install Node dependencies and build assets (PHP is available)
 RUN npm ci && npm run build
 
 # Create storage directories and set permissions
-RUN mkdir -p storage/logs \
-    && chmod -R 775 storage bootstrap/cache \
+RUN mkdir -p storage/logs database \
+    && chmod -R 775 storage bootstrap/cache database \
     && chown -R www-data:www-data /var/www
 
-# Generate APP_KEY if not present
+# Generate APP_KEY
 RUN php artisan key:generate --force
 
-# Create SQLite database directory
-RUN mkdir -p database && touch database/database.sqlite && chmod 775 database
-
-# Create cache and session tables
-RUN php artisan migrate --force
-
-# Create supervisor config directory
-RUN mkdir -p /etc/supervisor/conf.d
+# Create SQLite database
+RUN touch database/database.sqlite && chmod 775 database/database.sqlite
 
 # Copy Nginx configuration
-COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/nginx.conf /etc/nginx/http.d/default.conf
 
 # Copy Supervisor configuration
 COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Install supervisord for process management
-RUN apk add --no-cache supervisor
+# Create necessary directories
+RUN mkdir -p /var/log/supervisor /var/run/php-fpm
 
-# Expose port (Render uses PORT env variable)
+# Copy entrypoint script
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Expose port
 EXPOSE 10000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:10000/health || exit 1
 
-# Start application
-CMD php artisan serve --host=0.0.0.0 --port=10000
+# Run entrypoint
+ENTRYPOINT ["/entrypoint.sh"]
