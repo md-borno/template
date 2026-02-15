@@ -1,74 +1,36 @@
-FROM php:8.2-fpm-alpine
+# Stage 1 - Build Frontend (Vite)
+FROM node:18 AS frontend
+WORKDIR /app
+COPY package*.json ./
+RUN npm install
+COPY . .
+RUN npm run build
+
+# Stage 2 - Backend (Laravel + PHP + Composer)
+FROM php:8.2-fpm AS backend
 
 # Install system dependencies
-RUN apk add --no-cache \
-    curl \
-    libpng-dev \
-    oniguruma-dev \
-    libxml2-dev \
-    zip \
-    unzip \
-    git \
-    nodejs \
-    npm \
-    sqlite \
-    supervisor \
-    nginx
-
-# Install PHP extensions
-RUN docker-php-ext-install \
-    pdo \
-    pdo_sqlite \
-    mbstring \
-    exif \
-    pcntl \
-    bcmath \
-    gd
+RUN apt-get update && apt-get install -y \
+    git curl unzip libpq-dev libonig-dev libzip-dev zip \
+    && docker-php-ext-install pdo pdo_mysql mbstring zip
 
 # Install Composer
-COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
 
 WORKDIR /var/www
 
-# Copy application files FIRST
-COPY . /var/www
+# Copy app files
+COPY . .
 
-# Install PHP dependencies BEFORE npm build
-RUN composer install --no-interaction --optimize-autoloader --no-dev
+# Copy built frontend from Stage 1
+COPY --from=frontend /app/public/dist ./public/dist
 
-# NOW install Node dependencies and build assets (PHP is available)
-RUN npm ci && npm run build
+# Install PHP dependencies
+RUN composer install --no-dev --optimize-autoloader
 
-# Create storage directories and set permissions
-RUN mkdir -p storage/logs database \
-    && chmod -R 775 storage bootstrap/cache database \
-    && chown -R www-data:www-data /var/www
+# Laravel setup
+RUN php artisan config:clear && \
+    php artisan route:clear && \
+    php artisan view:clear
 
-# Generate APP_KEY
-RUN php artisan key:generate --force
-
-# Create SQLite database
-RUN touch database/database.sqlite && chmod 775 database/database.sqlite
-
-# Copy Nginx configuration
-COPY docker/nginx.conf /etc/nginx/http.d/default.conf
-
-# Copy Supervisor configuration
-COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Create necessary directories
-RUN mkdir -p /var/log/supervisor /var/run/php-fpm
-
-# Copy entrypoint script
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
-# Expose port
-EXPOSE 10000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:10000/health || exit 1
-
-# Run entrypoint
-ENTRYPOINT ["/entrypoint.sh"]
+CMD ["php-fpm"]
